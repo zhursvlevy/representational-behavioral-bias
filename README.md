@@ -1,488 +1,105 @@
-# representational-behavioral-gap
+# Representational vs. behavioral shape bias in vision-language models
 
-Исследовательский репозиторий для анализа **разрыва между внутренними представлениями и поведением vision-language models (VLMs)** на задачах shape/texture bias.  
-Проект сравнивает несколько VLM и отвечает на два основных вопроса:
+Code for the paper's experiments. It measures how strongly three vision-language models
+(LLaVA-1.5-7B, PaliGemma2-10B-mix, Qwen3-VL-8B) *behave* shape-biased on cue-conflict
+images, and compares that with how much shape and texture information linear probes can
+read from the models' language-side hidden states.
 
-1. **Что кодируется во внутренних языковых скрытых состояниях модели** при ответе на изображения из stylized ImageNet: shape или texture?
-2. **Можно ли сдвигать поведение модели** с помощью activation steering, вычитая направления, найденные линейными пробами?
+The repository contains code only. Every stimulus, hidden state, table and figure is
+regenerated from two input folders.
 
-В текущем виде репозиторий содержит код и результаты для моделей:
+## Inputs
 
-- `llava`
-- `paligemma2mix`
-- `qwen3vl`
+| Variable | What it is |
+|---|---|
+| `IMAGENET_VAL_DIR` | ImageNet (ILSVRC2012) validation images, one subfolder per WNID (`n01440764/`, ...). |
+| `GEIRHOS_STIMULI_DIR` | `stimuli/style-transfer-preprocessed-512` from [rgeirhos/texture-vs-shape](https://github.com/rgeirhos/texture-vs-shape). Used only for the random-vs-grouped split comparison. |
+| `OUTPUT_DIR` | Where all generated artifacts go (default `outputs/`). |
+| `MODELS_ROOT_PATH` | Optional directory of local model snapshots laid out as `<org>/<name>`; if empty, weights are downloaded from the Hugging Face Hub. |
+| `HF_TOKEN` | Optional Hugging Face token; needed for the gated `google/paligemma2-10b-mix-224`. |
 
----
-
-## Идея проекта
-
-На stylized ImageNet форма объекта и его текстура намеренно расходятся.  
-Например, изображение может иметь **форму кошки**, но **текстуру слона**. Это позволяет измерять:
-
-- **shape bias** — склонность модели отвечать по форме;
-- **texture bias** — склонность модели отвечать по текстуре.
-
-В репозитории реализованы два связанных направления анализа:
-
-### 1. Анализ представлений
-Из моделей извлекаются скрытые состояния последнего токена ответа по всем декодерным слоям.  
-Затем на каждом слое обучаются линейные классификаторы:
-
-- для предсказания `shape`-метки,
-- для предсказания `texture`-метки.
-
-Это позволяет оценить, насколько хорошо shape и texture разделимы в представлениях модели на разных слоях.
-
-### 2. Анализ поведения через activation steering
-После обучения линейных проб берутся найденные направления для shape/texture и из последнего скрытого состояня вычитается проекция на это направление:
-
-- вычитание `texture`-направления должно усиливать **shape bias**;
-- вычитание `shape`-направления должно усиливать **texture bias**.
-
-Далее измеряется, насколько реально меняются ответы модели.
-
----
-
-## Структура репозитория
-
-```text
-.
-├── environment.yml
-├── scripts/
-│   └── run_language_hidden_states_extraction.sh
-├── src/
-│   ├── experiments/
-│   │   ├── activation_steering.py
-│   │   ├── hidden_states_extraction.py
-│   │   ├── linear_probing.py
-│   │   └── plot_linear_classifiers_cross_val.py
-│   └── draw/
-│       ├── language_hidden_states_linear_probing_summary.py
-│       └── plot_activation_steering_shape_bias.py
-└── data/
-    ├── activation_steering/
-    ├── language_hidden_states/
-    ├── linear_classifiers/
-    ├── linear_classifiers_cross_val/
-    ├── language_features/
-    ├── vision_features/
-    ├── vision_shape_texture_metrics/
-    ├── paper_figures/
-    └── stylized-imagenet/
-```
-
-### Основные директории с данными
-
-- `data/stylized-imagenet/style-transfer-preprocessed-512/`  
-  Stylized ImageNet, используемый как входной датасет.
-
-- `data/language_hidden_states/`  
-  Сохранённые скрытые состояния языковой части VLM по слоям (`.npy`) и агрегированные summary-файлы.
-
-- `data/linear_classifiers/`  
-  Веса линейных проб для shape/texture, обученных по скрытым состояниям.
-
-- `data/activation_steering/`  
-  Результаты steering-экспериментов и графики метрик по `alpha`.
-
-- `data/paper_figures/`  
-  Подготовленные итоговые иллюстрации.
-
----
-
-## Используемый стек
-
-Окружение описано в `environment.yml`.
-
-Ключевые зависимости:
-
-- Python 3.10
-- PyTorch
-- Transformers
-- bitsandbytes
-- NumPy
-- scikit-learn
-- matplotlib
-- seaborn
-- tqdm
-- Pillow
-
----
-
-## Установка окружения
-
-### Через conda
+## Setup
 
 ```bash
-conda env create -f environment.yml
-conda activate transformers
+conda env create -f environment.yaml
+conda activate rbb
+cp configs/paths.env.example configs/paths.env   # then edit the paths
 ```
 
----
-
-## Внешние зависимости и ограничения
-
-### Локальные веса моделей
-Скрипты ожидают, что веса моделей уже скачаны локально и лежат в переменной окружения:
-
-```python
-export MODELS_ROOT_PATH="path/to/hugging/face/models"
-```
-
-Или в директории по-умолчанию:
-
-```python
-MODELS_ROOT_PATH = Path("data/models")
-```
-
-
-Он используется в:
-
-- `src/experiments/hidden_states_extraction.py`
-- `src/experiments/activation_steering.py`
-
-Если у вас другой путь к моделям, его нужно изменить в этих файлах.
-
-### Поддерживаемые модели
-В коде настроены следующие конфигурации:
-
-- `llava` → `llava-hf/llava-1.5-7b-hf`
-- `paligemma2mix` → `google/paligemma2-10b-mix-224`
-- `qwen3vl` → `Qwen/Qwen3-VL-8B-Instruct`
-
-### Аппаратные требования
-При наличии CUDA модели загружаются с:
-
-- `load_in_8bit=True`
-- `torch.float16`
-
-Без GPU код тоже может работать, но существенно медленнее и, вероятно, не для больших моделей в реальной практике.
-
----
-
-## Датасет и формат меток
-
-Имена файлов в stylized ImageNet интерпретируются как:
-
-```text
-{shape_name}{id}-{texture_name}{id}.png
-```
-
-Примеры:
-
-- `airplane1-bicycle2.png`
-- `bear4-oven2.png`
-
-Из имени извлекаются:
-
-- `shape_name` — истинная форма;
-- `texture_name` — истинная текстура.
-
-Для VQA-модели используется фиксированный prompt с 16 классами, каждому сопоставлена буква:
-
-- A — airplane
-- B — bear
-- C — bicycle
-- D — bird
-- E — boat
-- F — bottle
-- G — car
-- H — cat
-- I — chair
-- J — clock
-- K — dog
-- L — elephant
-- M — keyboard
-- N — knife
-- O — oven
-- P — truck
-
-Модель должна ответить **одной буквой**.
-
----
-
-## Основные эксперименты
-
-## 1. Извлечение hidden states
-
-Скрипт: `src/experiments/hidden_states_extraction.py`
-
-Что делает:
-
-- загружает VLM и processor;
-- прогоняет все `.png` из stylized ImageNet;
-- извлекает скрытые состояния последнего токена ответа для **всех слоёв**;
-- сохраняет результат в `.npy` для каждого изображения;
-- дополнительно сохраняет `shape_bias.json` с поведенческой метрикой модели на выбранном prompt.
-
-### Поддерживаемые prompt-режимы
-
-- `default`
-- `shape_biased`
-- `texture_biased`
-
-### Пример запуска
-
-Из корня репозитория:
+## Reproducing
 
 ```bash
-python src/experiments/hidden_states_extraction.py \
-  --model llava \
-  --output-dir data/language_hidden_states/llava \
-  --prompt-type default
+scripts/reproduce.sh            # everything
+scripts/reproduce.sh probe      # a single stage
+python -m rbb.pipeline --list all   # print every command without running it
 ```
 
-Пример для prompt-manipulation:
-
-```bash
-python src/experiments/hidden_states_extraction.py \
-  --model qwen3vl \
-  --output-dir data/language_hidden_states/qwen3vl/shape_biased_prompts \
-  --prompt-type shape_biased
-```
-
-### Что сохраняется
-
-- `data/language_hidden_states/<model>/**/*.npy` — массив формы `(num_layers, hidden_dim)`
-- `shape_bias.json` — summary по shape/texture bias для соответствующего запуска
-
----
-
-## 2. Линейное probing
-
-Скрипт: `src/experiments/linear_probing.py`
-
-Что делает:
-
-- загружает сохранённые hidden states;
-- для каждого слоя обучает два `LogisticRegression` классификатора:
-  - shape classifier,
-  - texture classifier;
-- вычисляет `macro F1` на test split;
-- сохраняет веса проб и графики качества по слоям.
-
-### Пример запуска
-
-```bash
-python src/experiments/linear_probing.py \
-  --input-dir data/language_hidden_states/llava \
-  --output-dir data/linear_classifiers/llava \
-  --random-state 42
-```
-
-### Multi-seed запуск
-
-```bash
-python src/experiments/linear_probing.py \
-  --input-dir data/language_hidden_states/llava \
-  --output-dir data/linear_classifiers_cross_val/llava \
-  --random-states 1 2 3 4 5
-```
-
-### Что сохраняется
-
-При single-seed запуске:
-
-- `shape_ws.npy`
-- `texture_ws.npy`
-- `f1_metrics.json`
-- `f1_metrics.png`
-
-При multi-seed запуске:
-
-- `shape_ws_by_seed.npy`
-- `texture_ws_by_seed.npy`
-- `f1_metrics.json`
-- `f1_metrics.png`
-
----
-
-## 3. Сводка по линейным пробам для разных prompt-режимов
-
-Скрипт: `src/draw/language_hidden_states_linear_probing_summary.py`
-
-Что делает:
-
-- рекурсивно сканирует `data/language_hidden_states/`;
-- находит директории с hidden states для разных моделей и prompt-режимов;
-- для последних `N` слоёв обучает shape/texture probes;
-- усредняет F1 и считает:
-  - `delta_f1_texture_minus_shape = avg_texture_f1 - avg_shape_f1`
-
-Положительное значение означает, что в последних слоях **texture легче линейно декодируется, чем shape**.
-
-### Пример запуска
-
-```bash
-python src/draw/language_hidden_states_linear_probing_summary.py \
-  --input-dir data/language_hidden_states \
-  --output-md data/language_hidden_states/linear_probe_delta_f1_summary.md \
-  --output-json data/language_hidden_states/linear_probe_delta_f1_summary.json \
-  --last-n-layers 4 \
-  --random-state 42
-```
-
-### Текущая summary-таблица
-
-Файл: `data/language_hidden_states/linear_probe_delta_f1_summary.md`
-
-| model | neutral | shape_biased | texture_biased |
-| --- | ---: | ---: | ---: |
-| llava | 0.22494 | 0.186076 | 0.248888 |
-| paligemma2mix | 0.280515 | 0.200656 | 0.337166 |
-| qwen3vl | 0.251593 | 0.196767 | 0.302644 |
-
-Интерпретация:
-
-- для всех трёх моделей `delta_f1_texture_minus_shape > 0`;
-- даже при `shape_biased` prompt texture остаётся лучше линейно декодируемой в последних слоях;
-- при `texture_biased` prompt разрыв обычно становится ещё больше.
-
----
-
-## 4. Activation steering
-
-Скрипт: `src/experiments/activation_steering.py`
-
-Что делает:
-
-1. Загружает модель.
-2. Загружает обученные веса линейных проб:
-   - `shape_ws.npy`
-   - `texture_ws.npy`
-3. Для каждого изображения получает последнее скрытое состояние последнего токена.
-4. Строит patched-варианты:
-   - вычитает проекцию на shape-направление;
-   - вычитает проекцию на texture-направление.
-5. Для диапазона `alpha` оценивает, как меняются ответы модели.
-6. Сохраняет итоговые bias-метрики и график.
-
-### Пример запуска
-
-```bash
-python src/experiments/activation_steering.py \
-  --model llava \
-  --alpha-start 0 \
-  --alpha-end 30 \
-  --alpha-step 0.5
-```
-
-### Выходные артефакты
-
-Для каждой модели в `data/activation_steering/<model>/`:
-
-- `answers.json` — метрики по всем значениям `alpha`
-- `answers_metrics.png` — графики изменения bias/flip-rate/stability
-
-### Основные метрики
-
-Скрипт вычисляет:
-
-- `shape_bias_orig`, `shape_bias_patched`
-- `texture_bias_orig`, `texture_bias_patched`
-- `shape_bias_gain`
-- `texture_bias_gain`
-- `flip_rate_tex_to_shape_pct`
-- `flip_rate_shape_to_tex_pct`
-- `stable_predictions_pct`
-
-Идея интерпретации:
-
-- если вычитание `texture`-компоненты увеличивает `shape_bias`, steering работает в ожидаемом направлении;
-- если вычитание `shape`-компоненты увеличивает `texture_bias`, steering тоже работает в ожидаемом направлении;
-- `stable_predictions_pct` показывает, насколько вмешательство вообще меняет поведение модели.
-
----
-
-## Дополнительные скрипты
-
-### `src/experiments/plot_linear_classifiers_cross_val.py`
-Скрипт для визуализации результатов cross-validation / multi-seed экспериментов линейных классификаторов.
-
-### `src/draw/plot_activation_steering_shape_bias.py`
-Скрипт для построения итоговых графиков по activation steering.
-
----
-
-## Готовые данные и артефакты в репозитории
-
-В репозитории уже лежат промежуточные и итоговые результаты:
-
-- hidden states для ряда моделей и prompt-режимов;
-- обученные линейные классификаторы;
-- activation steering outputs;
-- summary markdown/json;
-- итоговые картинки в `data/paper_figures/`.
-
-Это позволяет:
-
-- не запускать полный pipeline с нуля;
-- использовать репозиторий как архив экспериментов;
-- быстро строить дополнительные summary и figures поверх уже посчитанных данных.
-
----
-
-## Рекомендуемый порядок воспроизведения
-
-### Базовый pipeline
-
-1. Извлечь hidden states:
-   ```bash
-   python src/experiments/hidden_states_extraction.py --model llava --output-dir data/language_hidden_states/llava --prompt-type default
-   ```
-
-2. Обучить линейные пробы:
-   ```bash
-   python src/experiments/linear_probing.py --input-dir data/language_hidden_states/llava --output-dir data/linear_classifiers/llava --random-state 42
-   ```
-
-3. Запустить activation steering:
-   ```bash
-   python src/experiments/activation_steering.py --model llava --alpha-start 0 --alpha-end 30 --alpha-step 0.5
-   ```
-
-4. Построить summary:
-   ```bash
-   python src/draw/language_hidden_states_linear_probing_summary.py
-   ```
-
-### Batch-запуск hidden state extraction
-Есть вспомогательный shell-скрипт:
-
-```bash
-sh scripts/run_language_hidden_states_extraction.sh
-```
-
-Примечание: в текущем виде он вызывает `python hidden_states_extraction.py ...` без префикса `src/experiments/`, поэтому запускать его стоит либо после адаптации путей, либо из контекста, где этот файл доступен как `hidden_states_extraction.py`.
-
----
-
-## Что важно учитывать
-
-- Пути к локальным весам моделей сейчас не параметризованы через CLI или переменные окружения.
-- Репозиторий ориентирован на локальный исследовательский запуск, а не на упакованный production workflow.
-- Большая часть артефактов уже сохранена в `data/`, поэтому многие графики и таблицы можно использовать сразу.
-- Для больших моделей желателен GPU с поддержкой CUDA и достаточным объёмом памяти.
-
----
-
-## Возможные улучшения репозитория
-
-- вынести `MODELS_ROOT_PATH` в аргумент командной строки или переменную окружения;
-- добавить единый launcher / Makefile;
-- унифицировать пути в shell-скриптах;
-- добавить описание форматов `.npy` и `.json` артефактов;
-- добавить раздел с ключевыми количественными выводами по activation steering.
-
----
-
-## Краткий вывод по содержанию репозитория
-
-Репозиторий показывает исследовательский pipeline, в котором:
-
-- из VLM извлекаются скрытые языковые представления;
-- проверяется, что в них линейно декодируется лучше — shape или texture;
-- затем эти направления используются для causal-style intervention через activation steering;
-- после этого измеряется, насколько внутренние направления действительно контролируют наблюдаемое поведение модели.
-
-Именно этот разрыв между **декодируемостью признака в представлении** и **реальным поведенческим bias** и составляет центральную тему проекта.
+Stages run in this order. Each one skips outputs that already exist, so an interrupted
+run resumes where it stopped.
+
+| Stage | Module | Output (under `$OUTPUT_DIR`) |
+|---|---|---|
+| `imagenet16` | `rbb.stimuli.imagenet16` | `imagenet16/`: 1450 validation images of the 16 classes |
+| `stimuli` | `rbb.stimuli.cue_conflict` | `stimuli/main_l<λ>/` (1200 stimuli per λ), `stimuli/crop_l<λ>/` (300, crop control), `stimuli/style_crops/` |
+| `ceilings` | `rbb.stimuli.ceilings` | `ceiling_stimuli/{shape_photos,texture_photos,white_canvas_l<λ>}/` |
+| `extract` | `rbb.extract`, `rbb.analysis.recognizability` | `hidden_states/<condition>/<model>/`: per-image `.npy` (layers × dim), `answers.csv`, `shape_bias.json` |
+| `probe` | `rbb.probing` | `probes/folds/*.json`, `probes/<condition>/<model>/f1_metrics.json` |
+| `analyses` | `rbb.analysis.*` | `results/*.csv`, `results/*.json` |
+| `figures` | `rbb.figures.*` | `figures/*.pdf`, `figures/*.png` |
+| `validate` (optional) | `rbb.analysis.validate_probe` | `results/torch_vs_sklearn_validation.json` |
+
+**Compute.** Tested on one 16 GB GPU with 24 GB of CPU RAM for offloading. Stimulus
+generation (Gatys style transfer, 500 LBFGS iterations per image) and hidden-state
+extraction take about 15–20 GPU-hours in total. The later stages take minutes.
+
+**Determinism.** Given the same images, hidden states, answers, probes and statistics are
+reproduced exactly. Stimulus generation is not bit-exact on GPU: cuDNN nondeterminism is
+amplified over 500 LBFGS iterations, so two runs of the generator differ at the pixel
+level (the shape/texture pairs and all settings are identical). Numbers computed on
+regenerated stimuli therefore match the paper up to this sampling noise.
+
+### Where each paper result comes from
+
+| Paper item | File | Produced by |
+|---|---|---|
+| Stimulus examples | `figures/stimuli.pdf` | `rbb.figures.stimuli` |
+| Appendix stimuli (white canvases, crop control) | `figures/appendix_stimuli.pdf` | `rbb.figures.appendix` |
+| Shape bias and probe F1 vs. λ | `figures/scale_sweep_combined.pdf`, `results/correlation_stats.json` | `rbb.figures.curves`, `rbb.analysis.correlation` |
+| Answer breakdown | `figures/answer_breakdown.pdf`, `results/answer_breakdown.csv` | `rbb.analysis.behavior` |
+| Probe ceilings | `results/ceilings.csv` | `rbb.analysis.ceilings` |
+| Within-condition AUROC | `results/within_condition_auroc.csv`, `figures/margin_distribution_example.pdf` | `rbb.analysis.within_condition last-layer` |
+| AUROC across depth | `results/within_condition_by_layer.csv`, `figures/within_condition_by_layer.pdf` | `rbb.analysis.within_condition depth` |
+| Crop control | `results/crop_control_*.csv` | `rbb.analysis.crop_control` |
+| Style recognizability | `results/style_recognizability.csv` | `rbb.analysis.recognizability` |
+| Stimulus distances | `results/stimulus_distances.csv` | `rbb.analysis.stimulus_distances` |
+| Measurement protocol (random vs. grouped split) | `results/protocol_split_comparison.csv` | `rbb.analysis.protocol` |
+
+## Method details that are fixed in code
+
+- **Stimuli.** Gatys et al. style transfer with torchvision's VGG19. Style layers are
+  relu1_1 to relu5_1 (Gram matrices), the content layer is relu4_2, images are 256 px,
+  and λ is the style-weight scale. Shape/texture pairs are listed in
+  `src/rbb/resources/cue_conflict_pairs.csv`. The generator checks that it reproduces
+  that list.
+- **ImageNet subset.** The exact 1450 files are listed in
+  `src/rbb/resources/imagenet16_manifest.csv`. `sample_manifest()` in
+  `rbb/stimuli/imagenet16.py` documents how the list was drawn (up to 100 per class, seed 0).
+- **Models.** Weights are loaded in bfloat16, and image inputs are cast to float16. The
+  answer is the argmax next token of the language-model head at the last position,
+  decoded and matched to the answer letters A–P.
+- **Probes.** Multinomial logistic regression (L2, C = 1) is fit with batched LBFGS in
+  PyTorch on standardized features, one probe per layer. Cross-validation is 3-fold
+  StratifiedGroupKFold, grouped by source image (seed 42). One fold assignment per
+  stimulus set is shared across models, λ values and layers.
+
+## Attribution
+
+The WNID lists of the 16 categories (`src/rbb/resources/imagenet16_wnids.json`) are taken
+from Geirhos et al., *ImageNet-trained CNNs are biased towards texture; increasing shape
+bias improves accuracy and robustness* (ICLR 2019),
+[rgeirhos/texture-vs-shape](https://github.com/rgeirhos/texture-vs-shape). Their
+cue-conflict stimulus set is used as an input, not redistributed.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
